@@ -266,6 +266,7 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
             
             commandBuffer.present(currentDrawable)
             commandBuffer.commit()
+            textureCacheManager.flush()
             
             // Notify recording delegate if capturing
             recordingDelegate?.didRenderFrame(pixelBuffer: pixelBuffer, presentationTime: presentationTime)

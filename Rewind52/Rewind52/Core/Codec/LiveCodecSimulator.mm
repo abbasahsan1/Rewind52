@@ -82,6 +82,14 @@ static void InverseDCT8x8(const float input[8][8], float output[8][8]) {
     int _poolWidth;
     int _poolHeight;
     NSLock *_poolLock;
+    
+    // Persistent planar frame buffers to eliminate per-frame allocations
+    std::vector<float> _planeY;
+    std::vector<float> _planeU;
+    std::vector<float> _planeV;
+    int _currentPlaneWidth;
+    int _currentPlaneHeight;
+    NSLock *_bufferLock;
 }
 @end
 
@@ -101,8 +109,11 @@ static void InverseDCT8x8(const float input[8][8], float output[8][8]) {
     if (self) {
         InitDCTBasis();
         _poolLock = [[NSLock alloc] init];
+        _bufferLock = [[NSLock alloc] init];
         _poolWidth = 0;
         _poolHeight = 0;
+        _currentPlaneWidth = 0;
+        _currentPlaneHeight = 0;
         _pixelBufferPool = NULL;
     }
     return self;
@@ -192,15 +203,24 @@ static void InverseDCT8x8(const float input[8][8], float output[8][8]) {
     }
     qp = std::clamp(qp, 1, 31);
     
-    // Allocate YUV420P Planes
-    const int ySize = targetW * targetH;
     const int uvW = targetW / 2;
     const int uvH = targetH / 2;
-    const int uvSize = uvW * uvH;
     
-    std::vector<float> planeY(ySize);
-    std::vector<float> planeU(uvSize);
-    std::vector<float> planeV(uvSize);
+    // Reuse persistent planar memory buffers (only resize when dimensions change)
+    [_bufferLock lock];
+    if (_currentPlaneWidth != targetW || _currentPlaneHeight != targetH) {
+        const int ySize = targetW * targetH;
+        const int uvSize = uvW * uvH;
+        _planeY.resize(ySize);
+        _planeU.resize(uvSize);
+        _planeV.resize(uvSize);
+        _currentPlaneWidth = targetW;
+        _currentPlaneHeight = targetH;
+    }
+    
+    float *planeY = _planeY.data();
+    float *planeU = _planeU.data();
+    float *planeV = _planeV.data();
     
     // Scale & Convert BGRA -> YUV420P
     for (int ty = 0; ty < targetH; ty++) {
@@ -236,7 +256,7 @@ static void InverseDCT8x8(const float input[8][8], float output[8][8]) {
     
     const float quantStep = 2.0f * (float)qp;
     
-    auto processPlane = [&](std::vector<float> &plane, int w, int h, bool isLuma) {
+    auto processPlane = [&](float *plane, int w, int h, bool isLuma) {
         for (int by = 0; by < h; by += 8) {
             for (int bx = 0; bx < w; bx += 8) {
                 // Read 8x8 block
@@ -307,7 +327,10 @@ static void InverseDCT8x8(const float input[8][8], float output[8][8]) {
         CVPixelBufferCreate(kCFAllocatorDefault, inWidth, inHeight, kCVPixelFormatType_32BGRA, (__bridge CFDictionaryRef)attrs, &outPixelBuffer);
     }
     
-    if (!outPixelBuffer) return NULL;
+    if (!outPixelBuffer) {
+        [_bufferLock unlock];
+        return NULL;
+    }
     
     CVPixelBufferLockBaseAddress(outPixelBuffer, 0);
     uint8_t *outBase = (uint8_t *)CVPixelBufferGetBaseAddress(outPixelBuffer);
@@ -339,6 +362,7 @@ static void InverseDCT8x8(const float input[8][8], float output[8][8]) {
     }
     
     CVPixelBufferUnlockBaseAddress(outPixelBuffer, 0);
+    [_bufferLock unlock];
     return outPixelBuffer;
 }
 

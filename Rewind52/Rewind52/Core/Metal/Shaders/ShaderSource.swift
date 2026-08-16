@@ -253,6 +253,11 @@ fragment float4 analog_crt_fragment(VertexOutput in [[stage_in]],
 }
 
 // MARK: - Camcorder VHS Golden Age Shader (1985–1994)
+// Simulates:
+// 1. Continuous Full-Screen Tape Stretch Wobble & Bottom 6% Head-Switching Point Tearing
+// 2. Odd/Even Field Temporal Interlace Combing based on in.position.y
+// 3. Y/C Delay Line (Chroma Smear & Horizontal Bandwidth Limiting)
+// 4. CRT 480i Raster Lines & Magnetic Tape Hiss
 
 fragment float4 camcorder_vhs_fragment(VertexOutput in [[stage_in]],
                                        texture2d<float> cameraTexture [[texture(0)]],
@@ -260,50 +265,86 @@ fragment float4 camcorder_vhs_fragment(VertexOutput in [[stage_in]],
                                        constant EraUniforms &uniforms [[buffer(0)]]) {
     float2 uv = in.texCoords;
     
-    if (uniforms.isInterlaced == 1) {
-        int line = int(in.position.y);
-        int frameTick = int(uniforms.time * 60.0) % 2;
-        if (line % 2 == frameTick) {
-            uv.x += 0.001;
+    // -------------------------------------------------------------
+    // 1. CONTINUOUS FULL-SCREEN TAPE STRETCH & BOTTOM HEAD-SWITCH TEAR
+    // -------------------------------------------------------------
+    // Continuous multi-frequency tape stretch wobble across the full screen
+    float stretchWobble1 = sin(uv.y * 14.0 + uniforms.time * 4.5) * 0.0022;
+    float stretchWobble2 = sin(uv.y * 32.0 - uniforms.time * 12.0) * 0.0007;
+    float globalTapeWobble = stretchWobble1 + stretchWobble2;
+    
+    // Bottom 6% severe head-switching point tearing (drum motor timing offset)
+    float bottomTear = 0.0;
+    if (uv.y > 0.94) {
+        float tearFactor = (uv.y - 0.94) / 0.06;
+        float tearNoise = hash21(float2(floor(uv.y * 120.0), floor(uniforms.time * 24.0)));
+        float drumJitter = sin(uv.y * 80.0 + uniforms.time * 30.0) * 0.04;
+        bottomTear = (tearNoise - 0.5) * 0.08 * tearFactor + drumJitter * tearFactor;
+    }
+    
+    // High-frequency magnetic tape tracking jitter
+    float trackingJitter = (hash21(float2(floor(uv.y * 480.0), floor(uniforms.time * 30.0))) - 0.5) * 0.0009;
+    
+    uv.x += globalTapeWobble + bottomTear + trackingJitter;
+    
+    // -------------------------------------------------------------
+    // 2. ODD/EVEN FIELD TEMPORAL INTERLACING (TRUE COMBING)
+    // -------------------------------------------------------------
+    // Calculate exact physical scanline from vertex screen position
+    int scanline = int(in.position.y);
+    if (uniforms.isInterlaced == 1 || uniforms.isInterlaced == 0) {
+        // Even scanlines represent Field 2 (delayed by 1/60s relative to Field 1)
+        if (scanline % 2 == 0) {
+            // Horizontal temporal offset simulating motion delta between interlaced fields
+            float fieldMotionOffset = sin(uniforms.time * 6.0 + uv.y * 10.0) * 0.0035;
+            float fieldJitter = (hash21(float2(float(scanline), floor(uniforms.time * 60.0))) - 0.5) * 0.0012;
+            uv.x += (fieldMotionOffset + fieldJitter);
         }
     }
     
-    if (uv.y > 0.94) {
-        float tearNoise = hash21(float2(uv.y * 100.0, uniforms.time * 15.0));
-        uv.x += (tearNoise - 0.5) * 0.08 * (uv.y - 0.94) / 0.06;
-    }
-    
-    float ca = uniforms.chromaticAberrationIntensity * 0.003;
+    // -------------------------------------------------------------
+    // 3. Y/C CHROMA SMEAR & Y/C DELAY LINE SIMULATION
+    // -------------------------------------------------------------
+    float ca = uniforms.chromaticAberrationIntensity * 0.0035;
     float4 centerSample = cameraTexture.sample(textureSampler, uv);
     float3 yuvCenter = rgb2yuv(centerSample.rgb);
     
-    float3 sampleL = cameraTexture.sample(textureSampler, float2(uv.x - ca * 2.0, uv.y)).rgb;
-    float3 sampleR = cameraTexture.sample(textureSampler, float2(uv.x + ca * 2.0, uv.y)).rgb;
+    // VHS chrominance bandwidth is restricted to ~400kHz (wide horizontal smear)
+    float3 sampleL = cameraTexture.sample(textureSampler, float2(uv.x - ca * 2.5 - 0.002, uv.y)).rgb;
+    float3 sampleR = cameraTexture.sample(textureSampler, float2(uv.x + ca * 2.5 + 0.002, uv.y)).rgb;
     float3 yuvL = rgb2yuv(sampleL);
     float3 yuvR = rgb2yuv(sampleR);
     
-    float uBleed = (yuvL.y * 0.25 + yuvCenter.y * 0.5 + yuvR.y * 0.25);
-    float vBleed = (yuvL.z * 0.25 + yuvCenter.z * 0.5 + yuvR.z * 0.25);
+    float uBleed = (yuvL.y * 0.30 + yuvCenter.y * 0.40 + yuvR.y * 0.30);
+    float vBleed = (yuvL.z * 0.30 + yuvCenter.z * 0.40 + yuvR.z * 0.30);
     
+    // Reconstruct RGB from full-res luma (Y) and smeared chroma (U, V)
     float3 color = yuv2rgb(float3(yuvCenter.x, uBleed, vBleed));
     
+    // Analog edge fringing (red/cyan shift)
     float r = cameraTexture.sample(textureSampler, float2(uv.x - ca, uv.y)).r;
     float b = cameraTexture.sample(textureSampler, float2(uv.x + ca, uv.y)).b;
-    color.r = mix(color.r, r, 0.6);
-    color.b = mix(color.b, b, 0.6);
+    color.r = mix(color.r, r, 0.55);
+    color.b = mix(color.b, b, 0.55);
     
-    float scanline = sin(uv.y * 480.0 * 3.14159265);
-    scanline = 0.6 + 0.4 * scanline;
-    color *= mix(1.0, scanline, uniforms.scanLineIntensity * 0.35);
+    // -------------------------------------------------------------
+    // 4. CRT 480i RASTER SCANLINES & MAGNETIC TAPE GRAIN
+    // -------------------------------------------------------------
+    float rasterLine = sin(float(scanline) * 3.14159265);
+    float rasterDarken = 0.70 + 0.30 * (0.5 + 0.5 * rasterLine);
+    color *= mix(1.0, rasterDarken, uniforms.scanLineIntensity * 0.45);
     
-    float grain = (hash21(uv * 700.0 + uniforms.time * 20.0) - 0.5) * (uniforms.noiseFloorStrength * 0.3);
+    // Procedural magnetic tape noise
+    float grain = (hash21(uv * 650.0 + uniforms.time * 25.0) - 0.5) * (uniforms.noiseFloorStrength * 0.28);
     color += grain;
     
-    color.g *= 1.03;
-    color.r *= 0.98;
+    // Analog camcorder color matrix balance (slight green bias and warm roll-off)
+    color.g *= 1.02;
+    color.r *= 0.99;
     
-    float2 c = uv - 0.5;
-    float vignette = 1.0 - dot(c, c) * (uniforms.vignetteStrength * 1.2);
+    // Optical lens vignette
+    float2 c = in.texCoords - 0.5;
+    float vignette = 1.0 - dot(c, c) * (uniforms.vignetteStrength * 1.25);
     color *= clamp(vignette, 0.0, 1.0);
     
     return float4(clamp(color, 0.0, 1.0), 1.0);
