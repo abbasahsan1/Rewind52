@@ -272,8 +272,10 @@ public final class CameraService: NSObject, ObservableObject {
             
             do {
                 try device.lockForConfiguration()
-                if device.isFocusModeSupported(.locked) {
+                if device.isLockingFocusWithCustomLensPositionSupported {
                     device.setFocusModeLocked(lensPosition: clamped) { _ in }
+                } else if device.isFocusModeSupported(.locked) {
+                    device.focusMode = .locked
                 }
                 device.unlockForConfiguration()
                 
@@ -473,8 +475,10 @@ public final class CameraService: NSObject, ObservableObject {
             
             do {
                 try device.lockForConfiguration()
-                if device.isWhiteBalanceModeSupported(.locked) {
+                if device.isLockingWhiteBalanceWithCustomDeviceGainsSupported {
                     device.setWhiteBalanceModeLocked(with: gains) { _ in }
+                } else if device.isWhiteBalanceModeSupported(.locked) {
+                    device.whiteBalanceMode = .locked
                 }
                 device.unlockForConfiguration()
                 
@@ -587,17 +591,21 @@ public final class CameraService: NSObject, ObservableObject {
                 }
                 
                 // Fixed white balance cast replication
-                if era.video.whiteBalanceKelvin > 0 && device.isWhiteBalanceModeSupported(.locked) {
-                    let tempAndTint = AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(
-                        temperature: era.video.whiteBalanceKelvin,
-                        tint: 0.0
-                    )
-                    var gains = device.deviceWhiteBalanceGains(for: tempAndTint)
-                    let maxGain = device.maxWhiteBalanceGain
-                    gains.redGain = max(1.0, min(gains.redGain, maxGain))
-                    gains.greenGain = max(1.0, min(gains.greenGain, maxGain))
-                    gains.blueGain = max(1.0, min(gains.blueGain, maxGain))
-                    device.setWhiteBalanceModeLocked(with: gains) { _ in }
+                if era.video.whiteBalanceKelvin > 0 {
+                    if device.isLockingWhiteBalanceWithCustomDeviceGainsSupported {
+                        let tempAndTint = AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(
+                            temperature: era.video.whiteBalanceKelvin,
+                            tint: 0.0
+                        )
+                        var gains = device.deviceWhiteBalanceGains(for: tempAndTint)
+                        let maxGain = device.maxWhiteBalanceGain
+                        gains.redGain = max(1.0, min(gains.redGain, maxGain))
+                        gains.greenGain = max(1.0, min(gains.greenGain, maxGain))
+                        gains.blueGain = max(1.0, min(gains.blueGain, maxGain))
+                        device.setWhiteBalanceModeLocked(with: gains) { _ in }
+                    } else if device.isWhiteBalanceModeSupported(.locked) {
+                        device.whiteBalanceMode = .locked
+                    }
                 }
                 
                 device.unlockForConfiguration()
