@@ -218,9 +218,7 @@ public final class CameraPipelineCoordinator: NSObject, ObservableObject {
 
 extension CameraPipelineCoordinator: CameraServiceDelegate {
     public nonisolated func cameraService(_ service: CameraService, didOutput pixelBuffer: CVPixelBuffer, presentationTime: CMTime) {
-        Task { @MainActor in
-            self.metalRenderer?.updateLatestPixelBuffer(pixelBuffer, presentationTime: presentationTime)
-        }
+        self.metalRenderer?.updateLatestPixelBuffer(pixelBuffer, presentationTime: presentationTime)
     }
 }
 
