@@ -117,12 +117,21 @@ public final class AudioDSPManager: @unchecked Sendable {
             self.lock.unlock()
             
             if effectsOn {
-                // Procedural Tape Hiss (-40dB default) + 60Hz/120Hz AC motor hum
+                // 1. In-Memory AMR-NB 12.2kbps Speech Codec Roundtrip
+                if era.audio.amrEmulation {
+                    var audioConfig = EraCodecConfig()
+                    audioConfig.audioCodec = .audioAmrNb
+                    audioConfig.audioSampleRate = 8000
+                    audioConfig.audioBitrateBps = 12200
+                    _ = LiveCodecSimulator.sharedInstance().processAudioBuffer(buffer, config: audioConfig)
+                }
+                
+                // 2. Procedural Tape Hiss (-40dB default) + 60Hz/120Hz AC motor hum
                 let hiss = (era.audio.hissDb != 0.0) ? era.audio.hissDb : -40.0
                 let hum: Float = (era.category == .analogBroadcast || era.category == .camcorderGoldenAge) ? 0.35 : 0.05
                 self.noiseGenerator.processBuffer(buffer, hissDb: hiss, humStrength: hum)
                 
-                // Wow & Flutter dynamic delay-line pitch modulation (3Hz - 7Hz)
+                // 3. Wow & Flutter dynamic delay-line pitch modulation (3Hz - 7Hz)
                 let flutterRate = (era.audio.wowFlutterHz > 0) ? era.audio.wowFlutterHz : 5.0
                 let flutterDepth = (era.audio.wowFlutterDepth > 0) ? era.audio.wowFlutterDepth : 0.45
                 self.wowFlutterEngine.processBuffer(buffer, rateHz: flutterRate, depth: flutterDepth)

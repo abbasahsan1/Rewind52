@@ -88,6 +88,16 @@ public final class CameraService: NSObject, ObservableObject {
     // Target frame rate throttling (e.g. 15fps, 30fps)
     nonisolated(unsafe) private var targetFrameRate: Int = 30
     nonisolated(unsafe) private var lastEmittedFrameTime: TimeInterval = 0
+    nonisolated(unsafe) private var currentCodecConfig: EraCodecConfig = EraCodecConfig(
+        videoCodec: .videoH263,
+        targetWidth: 320,
+        targetHeight: 240,
+        bitrateBps: 100000,
+        qpScale: 24,
+        audioCodec: .audioAmrNb,
+        audioSampleRate: 8000,
+        audioBitrateBps: 12200
+    )
     
     public override init() {
         super.init()
@@ -578,6 +588,31 @@ public final class CameraService: NSObject, ObservableObject {
     public func setEraConfiguration(_ era: EraModel) {
         self.targetFrameRate = era.video.frameRate
         
+        var codecID: EraCodec = .passthrough
+        var qp: Int32 = 10
+        var bitrate: Int32 = 2500000
+        
+        if era.category == .mobileEarlySmartphone {
+            codecID = .videoH263
+            qp = 26 // Heavy macroblocking for 3GP / feature phone era
+            bitrate = 100000
+        } else if era.category == .earlyDigital {
+            codecID = .videoH263
+            qp = 16 // Moderate DCT blockiness for early MiniDV / webcam era
+            bitrate = 384000
+        }
+        
+        self.currentCodecConfig = EraCodecConfig(
+            videoCodec: codecID,
+            targetWidth: Int32(era.video.resolutionWidth),
+            targetHeight: Int32(era.video.resolutionHeight),
+            bitrateBps: bitrate,
+            qpScale: qp,
+            audioCodec: era.audio.amrEmulation ? .audioAmrNb : .passthrough,
+            audioSampleRate: Int32(era.audio.sampleRate),
+            audioBitrateBps: Int32(era.audio.bitrate)
+        )
+        
         sessionQueue.async { [weak self] in
             guard let device = self?.videoDeviceInput?.device else { return }
             do {
@@ -682,7 +717,13 @@ extension CameraService: AVCaptureVideoDataOutputSampleBufferDelegate {
         
         if now - lastEmittedFrameTime >= minFrameInterval * 0.92 {
             self.lastEmittedFrameTime = now
-            self.delegate?.cameraService(self, didOutput: pixelBuffer, presentationTime: presentationTime)
+            
+            // Execute in-memory H.263 / DCT codec roundtrip
+            if let processedBuffer = LiveCodecSimulator.sharedInstance().processPixelBuffer(pixelBuffer, config: self.currentCodecConfig) {
+                self.delegate?.cameraService(self, didOutput: processedBuffer, presentationTime: presentationTime)
+            } else {
+                self.delegate?.cameraService(self, didOutput: pixelBuffer, presentationTime: presentationTime)
+            }
         }
     }
 }
