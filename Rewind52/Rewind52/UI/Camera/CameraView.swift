@@ -136,9 +136,9 @@ public struct CameraView: View {
                             .foregroundColor(.white)
                             .tracking(1.5)
                         
-                        Text("Baking authentic \(coordinator.selectedEra.year) \(coordinator.selectedEra.name) codec & hardware artifacts...")
+                        Text(coordinator.processingStage.isEmpty ? "Baking authentic \(coordinator.selectedEra.year) \(coordinator.selectedEra.name) codec & hardware artifacts..." : coordinator.processingStage)
                             .font(.system(size: 13))
-                            .foregroundColor(.gray)
+                            .foregroundColor(RewindTheme.vintageAmber)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal, 40)
                         

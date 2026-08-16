@@ -1,0 +1,128 @@
+[
+  {
+    "id": "era_1995_minidv",
+    "name": "MiniDV Handycam",
+    "year": 1995,
+    "category": "Early Digital (1995–2004)",
+    "isFree": false,
+    "video": {
+      "resolutionWidth": 720,
+      "resolutionHeight": 480,
+      "frameRate": 15,
+      "isInterlaced": true,
+      "colorSpace": "BT.601 NTSC",
+      "shaderFunction": "early_digital_fragment",
+      "autoExposureLock": false,
+      "fixedISO": 200,
+      "whiteBalanceKelvin": 5200,
+      "posterizeColors": 64,
+      "macroblockGridSize": 8,
+      "chromaticAberrationIntensity": 0.35,
+      "scanLineIntensity": 0.2,
+      "trackingWobbleSpeed": 0.0,
+      "vignetteStrength": 0.25,
+      "noiseFloorStrength": 0.3
+    },
+    "audio": {
+      "sampleRate": 32000,
+      "channels": 2,
+      "bitrate": 128000,
+      "hissDb": -52.0,
+      "wowFlutterHz": 0.0,
+      "wowFlutterDepth": 0.0,
+      "lowPassCutoffHz": 14000.0,
+      "highPassCutoffHz": 40.0,
+      "bitDepth": 12,
+      "isMuffled": false,
+      "amrEmulation": false
+    },
+    "dateStamp": {
+      "enabled": true,
+      "font": "vcrOSD",
+      "colorHex": "#00FFCC",
+      "position": "bottomLeft",
+      "format": "MMM.dd.yyyy hh:mm a",
+      "blinkingRec": true,
+      "recDotColorHex": "#FF0033",
+      "customTextAllowed": true,
+      "gpsAllowed": true
+    },
+    "export": {
+      "container": "mp4",
+      "videoCodec": "h264",
+      "audioCodec": "aac",
+      "nativeAspectRatio": "4:3",
+      "pipelineSteps": ["macroblockGrid", "posterization"]
+    },
+    "history": {
+      "title": "1995 MiniDV Revolution",
+      "year": 1995,
+      "summary": "First consumer digital video format featuring 500 lines of horizontal resolution, 8x8 DCT compression, and 12-bit PCM audio.",
+      "hardwareHardwareNotes": "Sony DCR-VX1000 with 3CCD color separation and IEEE 1394 FireWire interface.",
+      "culturalContext": "Skateboarding videos, indie filmmaking revolution, and late 90s MTV aesthetics."
+    }
+  },
+  {
+    "id": "era_1998_webcam",
+    "name": "USB QuickCam Video",
+    "year": 1998,
+    "category": "Early Digital (1995–2004)",
+    "isFree": false,
+    "video": {
+      "resolutionWidth": 320,
+      "resolutionHeight": 240,
+      "frameRate": 15,
+      "isInterlaced": false,
+      "colorSpace": "sRGB",
+      "shaderFunction": "early_digital_fragment",
+      "autoExposureLock": false,
+      "fixedISO": 400,
+      "whiteBalanceKelvin": 5500,
+      "posterizeColors": 32,
+      "macroblockGridSize": 8,
+      "chromaticAberrationIntensity": 0.6,
+      "scanLineIntensity": 0.1,
+      "trackingWobbleSpeed": 0.0,
+      "vignetteStrength": 0.45,
+      "noiseFloorStrength": 0.55
+    },
+    "audio": {
+      "sampleRate": 22050,
+      "channels": 1,
+      "bitrate": 64000,
+      "hissDb": -42.0,
+      "wowFlutterHz": 0.0,
+      "wowFlutterDepth": 0.0,
+      "lowPassCutoffHz": 6000.0,
+      "highPassCutoffHz": 120.0,
+      "bitDepth": 8,
+      "isMuffled": true,
+      "amrEmulation": false
+    },
+    "dateStamp": {
+      "enabled": true,
+      "font": "modernClean",
+      "colorHex": "#FFFFFF",
+      "position": "topLeft",
+      "format": "yyyy/MM/dd HH:mm:ss",
+      "blinkingRec": false,
+      "recDotColorHex": "#FF0000",
+      "customTextAllowed": true,
+      "gpsAllowed": false
+    },
+    "export": {
+      "container": "mp4",
+      "videoCodec": "h264",
+      "audioCodec": "aac",
+      "nativeAspectRatio": "4:3",
+      "pipelineSteps": ["macroblockGrid", "posterization"]
+    },
+    "history": {
+      "title": "1998 USB Webcam Era",
+      "year": 1998,
+      "summary": "Pioneered internet video streaming over dial-up connections with aggressive DCT quantizing, 16-bit color, and rolling shutter lag.",
+      "hardwareHardwareNotes": "Connectix QuickCam VC & Logitech QuickCam Pro CMOS sensors with USB 1.1 bandwidth limits.",
+      "culturalContext": "Early cyber-culture, IRC video channels, and dot-com era home webcasting."
+    }
+  }
+]

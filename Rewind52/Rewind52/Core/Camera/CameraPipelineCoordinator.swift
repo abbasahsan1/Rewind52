@@ -24,6 +24,7 @@ public final class CameraPipelineCoordinator: NSObject, ObservableObject {
     @Published public var recordingDuration: TimeInterval = 0
     @Published public var isProcessingRecording: Bool = false
     @Published public var processingProgress: Double = 0.0
+    @Published public var processingStage: String = ""
     
     @Published public var osdState = OSDState()
     @Published public var isAudioEffectsOn: Bool = true
@@ -39,6 +40,7 @@ public final class CameraPipelineCoordinator: NSObject, ObservableObject {
     private let entitlementManager = EntitlementManager.shared
     private let sfxPlayer = AudioSFXPlayer.shared
     private let arManager = ARDateStampManager.shared
+    private let liveActivityManager = AuthenticityLiveActivityManager.shared
     private let videoWriter = VideoWriter()
     
     private var recordingTimer: Timer?
@@ -133,6 +135,8 @@ public final class CameraPipelineCoordinator: NSObject, ObservableObject {
         
         isProcessingRecording = true
         processingProgress = 0.0
+        processingStage = "Initializing Multi-Pass Pipeline..."
+        liveActivityManager.startActivity(eraName: selectedEra.name)
         
         videoWriter.finishRecording { [weak self] result in
             DispatchQueue.main.async {
@@ -144,23 +148,32 @@ public final class CameraPipelineCoordinator: NSObject, ObservableObject {
                             let processedURL = try await AuthenticityPipeline.shared.processRecording(
                                 sourceURL: rawURL,
                                 era: self.selectedEra
-                            ) { progress in
+                            ) { progress, stage in
                                 DispatchQueue.main.async {
                                     self.processingProgress = progress
+                                    self.processingStage = stage
+                                    self.liveActivityManager.updateProgress(
+                                        progress: progress,
+                                        status: stage,
+                                        eraName: self.selectedEra.name
+                                    )
                                 }
                             }
                             
                             self.galleryManager.addVideo(url: processedURL, era: self.selectedEra)
                             self.isProcessingRecording = false
+                            self.liveActivityManager.endActivity(finalStatus: "Bake Complete!")
                         } catch {
                             print("Authenticity pipeline error: \(error)")
                             self.galleryManager.addVideo(url: rawURL, era: self.selectedEra)
                             self.isProcessingRecording = false
+                            self.liveActivityManager.endActivity(finalStatus: "Saved Raw Video")
                         }
                     }
                 case .failure(let error):
                     print("Finish recording error: \(error)")
                     self.isProcessingRecording = false
+                    self.liveActivityManager.endActivity(finalStatus: "Recording Failed")
                 }
             }
         }

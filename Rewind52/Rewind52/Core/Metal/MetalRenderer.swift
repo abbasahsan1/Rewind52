@@ -12,7 +12,8 @@ import CoreVideo
 import CoreMedia
 import SwiftUI
 
-// Match the Metal shader uniforms struct exactly
+// MARK: - Era Uniforms Matching Metal Shader Struct
+
 public struct MetalEraUniforms {
     var time: Float
     var chromaticAberrationIntensity: Float
@@ -33,27 +34,27 @@ public protocol MetalRendererRecordingDelegate: AnyObject, Sendable {
 }
 
 public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
+    // MARK: - Metal Core Objects
     public let device: MTLDevice
     public let commandQueue: MTLCommandQueue
     public let textureCacheManager: TextureCacheManager
     
     private var pipelineStates: [String: MTLRenderPipelineState] = [:]
-    private var overlayPipelineState: MTLRenderPipelineState?
     private var vertexBuffer: MTLBuffer?
     private var samplerState: MTLSamplerState?
     
     private let startTime: Date = Date()
     private var currentEra: EraModel = EraRegistry.shared.eras.first { $0.id == EraRegistry.shared.defaultEraId }!
     
+    // MARK: - Frame State & Thread Synchronization
     private let frameLock = NSLock()
     private var latestPixelBuffer: CVPixelBuffer?
     private var latestPresentationTime: CMTime = .zero
-    
     private var osdTexture: MTLTexture?
     
     public weak var recordingDelegate: MetalRendererRecordingDelegate?
     
-    // Full screen quad vertices (position x, y, texCoord u, v)
+    // Full screen quad geometry (position x, y, texCoord u, v)
     private let quadVertices: [Float] = [
         -1.0, -1.0, 0.0, 1.0,
          1.0, -1.0, 1.0, 1.0,
@@ -80,16 +81,18 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
         setupSamplerState()
     }
     
-    public func setEra(_ era: EraModel) {
-        frameLock.lock()
-        self.currentEra = era
-        frameLock.unlock()
-    }
+    // MARK: - Frame Ingestion & Configuration
     
     public func updateLatestPixelBuffer(_ pixelBuffer: CVPixelBuffer, presentationTime: CMTime) {
         frameLock.lock()
         self.latestPixelBuffer = pixelBuffer
         self.latestPresentationTime = presentationTime
+        frameLock.unlock()
+    }
+    
+    public func setEra(_ era: EraModel) {
+        frameLock.lock()
+        self.currentEra = era
         frameLock.unlock()
     }
     
@@ -99,29 +102,21 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
         frameLock.unlock()
     }
     
+    // MARK: - Metal Pipeline Setup
+    
     private func setupPipelines() {
         let library: MTLLibrary?
         do {
             library = try device.makeLibrary(source: ShaderSource.source, options: nil)
         } catch {
-            print("Dynamic metal compilation error, trying default library: \(error)")
+            print("Dynamic Metal shader compilation error, falling back to default library: \(error)")
             library = device.makeDefaultLibrary()
         }
         
         guard let library = library else {
-            print("Failed to load Metal library")
+            print("Failed to initialize Metal shader library")
             return
         }
-        
-        let shaderNames = [
-            "analog_crt_fragment",
-            "camcorder_vhs_fragment",
-            "early_digital_fragment",
-            "mobile_3gp_fragment",
-            "modern_reference_fragment",
-            "overlay_composite_fragment",
-            "multicam_split_fragment"
-        ]
         
         let vertexDescriptor = MTLVertexDescriptor()
         vertexDescriptor.attributes[0].format = .float2
@@ -135,9 +130,19 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
         vertexDescriptor.layouts[0].stepFunction = .perVertex
         
         guard let vertexFunction = library.makeFunction(name: "default_vertex") else {
-            print("Failed to load default_vertex shader function")
+            print("Failed to locate default_vertex shader function")
             return
         }
+        
+        let shaderNames = [
+            "early_digital_fragment",
+            "analog_crt_fragment",
+            "camcorder_vhs_fragment",
+            "mobile_3gp_fragment",
+            "modern_reference_fragment",
+            "overlay_composite_fragment",
+            "multicam_split_fragment"
+        ]
         
         for name in shaderNames {
             guard let fragmentFunction = library.makeFunction(name: name) else {
@@ -146,28 +151,15 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
             }
             
             let pipelineDescriptor = MTLRenderPipelineDescriptor()
+            pipelineDescriptor.label = "Rewind52 \(name) Pipeline"
             pipelineDescriptor.vertexFunction = vertexFunction
             pipelineDescriptor.fragmentFunction = fragmentFunction
             pipelineDescriptor.vertexDescriptor = vertexDescriptor
             pipelineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
             
-            // Enable alpha blending for overlay shader
-            if name == "overlay_composite_fragment" {
-                pipelineDescriptor.colorAttachments[0].isBlendingEnabled = true
-                pipelineDescriptor.colorAttachments[0].rgbBlendOperation = .add
-                pipelineDescriptor.colorAttachments[0].alphaBlendOperation = .add
-                pipelineDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
-                pipelineDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
-                pipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
-                pipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
-            }
-            
             do {
                 let pipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
                 pipelineStates[name] = pipelineState
-                if name == "overlay_composite_fragment" {
-                    self.overlayPipelineState = pipelineState
-                }
             } catch {
                 print("Failed to create pipeline state for \(name): \(error)")
             }
@@ -192,104 +184,91 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
         samplerState = device.makeSamplerState(descriptor: samplerDescriptor)
     }
     
-    // MARK: - MTKViewDelegate
+    // MARK: - MTKViewDelegate & Zero-Leak Rendering Loop
     
     public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        // Handle size changes if needed
+        // Handle size change if needed
     }
     
     public func draw(in view: MTKView) {
-        frameLock.lock()
-        guard let pixelBuffer = latestPixelBuffer,
-              let currentDrawable = view.currentDrawable,
-              let renderPassDescriptor = view.currentRenderPassDescriptor else {
+        autoreleasepool {
+            frameLock.lock()
+            guard let pixelBuffer = latestPixelBuffer,
+                  let currentDrawable = view.currentDrawable,
+                  let renderPassDescriptor = view.currentRenderPassDescriptor else {
+                frameLock.unlock()
+                return
+            }
+            let era = self.currentEra
+            let presentationTime = self.latestPresentationTime
             frameLock.unlock()
-            return
-        }
-        
-        let era = self.currentEra
-        let pTime = self.latestPresentationTime
-        let osd = self.osdTexture
-        frameLock.unlock()
-        
-        guard let inputTexture = textureCacheManager.texture(from: pixelBuffer),
-              let commandBuffer = commandQueue.makeCommandBuffer() else {
-            return
-        }
-        
-        let shaderName = era.video.shaderFunction
-        guard let pipelineState = pipelineStates[shaderName] ?? pipelineStates["modern_reference_fragment"],
-              let vertexBuffer = vertexBuffer,
-              let samplerState = samplerState else {
-            return
-        }
-        
-        // Calculate dynamic aspect ratio scaling
-        let viewAspect = Float(view.drawableSize.width / max(1.0, view.drawableSize.height))
-        let targetAspect: Float
-        switch era.export.nativeAspectRatio {
-        case .standard4_3:
-            targetAspect = 4.0 / 3.0
-        case .widescreen16_9:
-            targetAspect = 16.0 / 9.0
-        case .portrait9_16:
-            targetAspect = 9.0 / 16.0
-        case .custom:
-            targetAspect = Float(era.video.resolutionWidth) / Float(max(1, era.video.resolutionHeight))
-        }
-        
-        var scaleX: Float = 1.0
-        var scaleY: Float = 1.0
-        if viewAspect > targetAspect {
-            // Screen is wider than target aspect ratio -> scale X down (pillarbox)
-            scaleX = targetAspect / viewAspect
-        } else {
-            // Screen is taller than target aspect ratio -> scale Y down (letterbox)
-            scaleY = viewAspect / targetAspect
-        }
-        
-        let elapsed = Float(Date().timeIntervalSince(startTime))
-        var uniforms = MetalEraUniforms(
-            time: elapsed,
-            chromaticAberrationIntensity: era.video.chromaticAberrationIntensity,
-            scanLineIntensity: era.video.scanLineIntensity,
-            trackingWobbleSpeed: era.video.trackingWobbleSpeed,
-            vignetteStrength: era.video.vignetteStrength,
-            noiseFloorStrength: era.video.noiseFloorStrength,
-            posterizeColors: Int32(era.video.posterizeColors),
-            macroblockGridSize: Int32(era.video.macroblockGridSize),
-            isInterlaced: era.video.isInterlaced ? 1 : 0,
-            colorTemperatureShift: (era.video.whiteBalanceKelvin - 5500.0) / 3000.0,
-            aspectRatioScaleX: scaleX,
-            aspectRatioScaleY: scaleY
-        )
-        
-        guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
-            return
-        }
-        
-        renderEncoder.setRenderPipelineState(pipelineState)
-        renderEncoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
-        renderEncoder.setVertexBytes(&uniforms, length: MemoryLayout<MetalEraUniforms>.size, index: 1)
-        renderEncoder.setFragmentTexture(inputTexture, index: 0)
-        renderEncoder.setFragmentSamplerState(samplerState, index: 0)
-        renderEncoder.setFragmentBytes(&uniforms, length: MemoryLayout<MetalEraUniforms>.size, index: 0)
-        
-        renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
-        
-        // Render OSD overlay if present
-        if let osd = osd, let overlayPipe = overlayPipelineState {
-            renderEncoder.setRenderPipelineState(overlayPipe)
-            renderEncoder.setFragmentTexture(osd, index: 1)
+            
+            // Zero-copy transfer of CVPixelBuffer to hardware MTLTexture
+            guard let inputTexture = textureCacheManager.texture(from: pixelBuffer),
+                  let vertexBuffer = vertexBuffer,
+                  let samplerState = samplerState,
+                  let commandBuffer = commandQueue.makeCommandBuffer() else {
+                return
+            }
+            
+            let shaderName = era.video.shaderFunction
+            guard let pipelineState = pipelineStates[shaderName] ?? pipelineStates["early_digital_fragment"] ?? pipelineStates.values.first else {
+                return
+            }
+            
+            // Dynamic 16:9 aspect ratio calculation
+            let drawableWidth = max(1.0, Float(view.drawableSize.width))
+            let drawableHeight = max(1.0, Float(view.drawableSize.height))
+            let viewAspect = drawableWidth / drawableHeight
+            
+            // Target 16:9 (0.5625 in portrait 9:16, 1.777 in landscape 16:9)
+            let targetAspect: Float = (drawableHeight > drawableWidth) ? (9.0 / 16.0) : (16.0 / 9.0)
+            
+            var scaleX: Float = 1.0
+            var scaleY: Float = 1.0
+            
+            if viewAspect > targetAspect {
+                scaleX = targetAspect / viewAspect
+            } else {
+                scaleY = viewAspect / targetAspect
+            }
+            
+            let elapsed = Float(Date().timeIntervalSince(startTime))
+            var uniforms = MetalEraUniforms(
+                time: elapsed,
+                chromaticAberrationIntensity: era.video.chromaticAberrationIntensity,
+                scanLineIntensity: era.video.scanLineIntensity,
+                trackingWobbleSpeed: era.video.trackingWobbleSpeed,
+                vignetteStrength: era.video.vignetteStrength,
+                noiseFloorStrength: era.video.noiseFloorStrength,
+                posterizeColors: Int32(era.video.posterizeColors),
+                macroblockGridSize: Int32(era.video.macroblockGridSize),
+                isInterlaced: era.video.isInterlaced ? 1 : 0,
+                colorTemperatureShift: (era.video.whiteBalanceKelvin - 5500.0) / 3000.0,
+                aspectRatioScaleX: scaleX,
+                aspectRatioScaleY: scaleY
+            )
+            
+            guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+                return
+            }
+            
+            renderEncoder.label = "Rewind52 \(shaderName) Encoder"
+            renderEncoder.setRenderPipelineState(pipelineState)
+            renderEncoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+            renderEncoder.setVertexBytes(&uniforms, length: MemoryLayout<MetalEraUniforms>.size, index: 1)
+            renderEncoder.setFragmentTexture(inputTexture, index: 0)
+            renderEncoder.setFragmentSamplerState(samplerState, index: 0)
+            renderEncoder.setFragmentBytes(&uniforms, length: MemoryLayout<MetalEraUniforms>.size, index: 0)
+            
             renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            renderEncoder.endEncoding()
+            
+            commandBuffer.present(currentDrawable)
+            commandBuffer.commit()
+            
+            // Notify recording delegate if capturing
+            recordingDelegate?.didRenderFrame(pixelBuffer: pixelBuffer, presentationTime: presentationTime)
         }
-        
-        renderEncoder.endEncoding()
-        
-        commandBuffer.present(currentDrawable)
-        commandBuffer.commit()
-        
-        // Notify recording delegate if capturing
-        recordingDelegate?.didRenderFrame(pixelBuffer: pixelBuffer, presentationTime: pTime)
     }
 }

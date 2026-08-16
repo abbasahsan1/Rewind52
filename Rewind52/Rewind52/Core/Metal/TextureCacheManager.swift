@@ -12,6 +12,7 @@ import CoreVideo
 public final class TextureCacheManager: @unchecked Sendable {
     private var textureCache: CVMetalTextureCache?
     private let device: MTLDevice
+    private let lock = NSLock()
     
     public init(device: MTLDevice) {
         self.device = device
@@ -24,7 +25,11 @@ public final class TextureCacheManager: @unchecked Sendable {
         }
     }
     
+    /// Creates an uncompressed zero-copy MTLTexture directly mapped from the hardware CVPixelBuffer.
     public func texture(from pixelBuffer: CVPixelBuffer) -> MTLTexture? {
+        lock.lock()
+        defer { lock.unlock() }
+        
         guard let textureCache = textureCache else { return nil }
         
         let width = CVPixelBufferGetWidth(pixelBuffer)
@@ -48,10 +53,14 @@ public final class TextureCacheManager: @unchecked Sendable {
             return nil
         }
         
-        return CVMetalTextureGetTexture(cvTexture)
+        let mtlTexture = CVMetalTextureGetTexture(cvTexture)
+        return mtlTexture
     }
     
+    /// Flushes the underlying texture cache to reclaim unused GPU memory and prevent memory leaks.
     public func flush() {
+        lock.lock()
+        defer { lock.unlock() }
         if let textureCache = textureCache {
             CVMetalTextureCacheFlush(textureCache, 0)
         }

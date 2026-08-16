@@ -8,6 +8,7 @@
 import Foundation
 import AVFoundation
 import CoreVideo
+import CoreMedia
 
 public protocol VideoWriterDelegate: AnyObject, Sendable {
     func videoWriterDidFinishRecording(outputURL: URL, era: EraModel)
@@ -25,6 +26,10 @@ public final class VideoWriter: @unchecked Sendable {
     private var startTime: CMTime = .invalid
     private var outputURL: URL?
     private var currentEra: EraModel?
+    
+    // Native Target Framerate Locking state (e.g. exactly 15 fps)
+    private var targetFPS: Int32 = 30
+    private var recordedFrameIndex: Int64 = 0
     
     public weak var delegate: VideoWriterDelegate?
     
@@ -48,20 +53,27 @@ public final class VideoWriter: @unchecked Sendable {
             do {
                 let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
                 
-                // Video settings based on era native resolution and codec
+                let fps = Int32(max(1, era.video.frameRate))
+                self.targetFPS = fps
+                self.recordedFrameIndex = 0
+                
+                // Video compression settings with native locked target framerate
+                let videoCompressionProperties: [String: Any] = [
+                    AVVideoAverageBitRateKey: max(500_000, era.audio.bitrate * 8),
+                    AVVideoMaxKeyFrameIntervalKey: Int(fps * 2),
+                    AVVideoExpectedSourceFrameRateKey: Int(fps)
+                ]
+                
                 let videoSettings: [String: Any] = [
                     AVVideoCodecKey: AVVideoCodecType.h264,
                     AVVideoWidthKey: Int(outputSize.width),
                     AVVideoHeightKey: Int(outputSize.height),
-                    AVVideoCompressionPropertiesKey: [
-                        AVVideoAverageBitRateKey: max(500_000, era.audio.bitrate * 8),
-                        AVVideoMaxKeyFrameIntervalKey: era.video.frameRate * 2,
-                        AVVideoExpectedSourceFrameRateKey: era.video.frameRate
-                    ]
+                    AVVideoCompressionPropertiesKey: videoCompressionProperties
                 ]
                 
                 let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
                 vInput.expectsMediaDataInRealTime = true
+                vInput.mediaTimeScale = fps
                 
                 let pixelBufferAttributes: [String: Any] = [
                     kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA),
@@ -118,12 +130,16 @@ public final class VideoWriter: @unchecked Sendable {
                 return
             }
             
+            // Native locked timestamp progression (e.g. exact 1/15s steps)
+            let frameTime = CMTime(value: self.recordedFrameIndex, timescale: self.targetFPS)
+            
             if self.startTime == .invalid {
-                self.startTime = presentationTime
-                writer.startSession(atSourceTime: presentationTime)
+                self.startTime = frameTime
+                writer.startSession(atSourceTime: frameTime)
             }
             
-            adaptor.append(pixelBuffer, withPresentationTime: presentationTime)
+            adaptor.append(pixelBuffer, withPresentationTime: frameTime)
+            self.recordedFrameIndex += 1
         }
     }
     
