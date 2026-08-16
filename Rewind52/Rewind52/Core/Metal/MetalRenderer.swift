@@ -52,6 +52,12 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
     private var latestPresentationTime: CMTime = .zero
     private var osdTexture: MTLTexture?
     
+    // MARK: - Persistent Offscreen PixelBuffer Pool
+    private var offscreenPool: CVPixelBufferPool?
+    private var offscreenPoolWidth: Int = 0
+    private var offscreenPoolHeight: Int = 0
+    private let poolLock = NSLock()
+    
     public weak var recordingDelegate: MetalRendererRecordingDelegate?
     
     // Full screen quad geometry (position x, y, texCoord u, v)
@@ -102,6 +108,43 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
         frameLock.unlock()
     }
     
+    // MARK: - Persistent CVPixelBufferPool Management
+    
+    private func getOrCreateOffscreenPool(width: Int, height: Int) -> CVPixelBufferPool? {
+        poolLock.lock()
+        defer { poolLock.unlock() }
+        
+        if let pool = offscreenPool, offscreenPoolWidth == width, offscreenPoolHeight == height {
+            return pool
+        }
+        
+        offscreenPool = nil
+        let poolAttributes: [CFString: Any] = [
+            kCVPixelBufferPoolMinimumBufferCountKey: 4
+        ]
+        let pixelBufferAttributes: [CFString: Any] = [
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey: width,
+            kCVPixelBufferHeightKey: height,
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as [CFString: Any]
+        ]
+        
+        var newPool: CVPixelBufferPool?
+        let status = CVPixelBufferPoolCreate(
+            kCFAllocatorDefault,
+            poolAttributes as CFDictionary,
+            pixelBufferAttributes as CFDictionary,
+            &newPool
+        )
+        if status == kCVReturnSuccess, let pool = newPool {
+            self.offscreenPool = pool
+            self.offscreenPoolWidth = width
+            self.offscreenPoolHeight = height
+            return pool
+        }
+        return nil
+    }
+    
     // MARK: - Metal Pipeline Setup
     
     private func setupPipelines() {
@@ -135,6 +178,7 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
         }
         
         let shaderNames = [
+            "passthrough_fragment",
             "early_digital_fragment",
             "analog_crt_fragment",
             "camcorder_vhs_fragment",
@@ -156,6 +200,15 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
             pipelineDescriptor.fragmentFunction = fragmentFunction
             pipelineDescriptor.vertexDescriptor = vertexDescriptor
             pipelineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+            
+            // Enable alpha blending for all pipeline states
+            pipelineDescriptor.colorAttachments[0].isBlendingEnabled = true
+            pipelineDescriptor.colorAttachments[0].rgbBlendOperation = .add
+            pipelineDescriptor.colorAttachments[0].alphaBlendOperation = .add
+            pipelineDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+            pipelineDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            pipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+            pipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
             
             do {
                 let pipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
@@ -184,7 +237,7 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
         samplerState = device.makeSamplerState(descriptor: samplerDescriptor)
     }
     
-    // MARK: - MTKViewDelegate & Zero-Leak Rendering Loop
+    // MARK: - MTKViewDelegate & Offscreen Rendering Engine
     
     public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         // Handle size change if needed
@@ -195,7 +248,7 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
             frameLock.lock()
             guard let pixelBuffer = latestPixelBuffer,
                   let currentDrawable = view.currentDrawable,
-                  let renderPassDescriptor = view.currentRenderPassDescriptor else {
+                  let viewPassDescriptor = view.currentRenderPassDescriptor else {
                 frameLock.unlock()
                 return
             }
@@ -203,8 +256,18 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
             let presentationTime = self.latestPresentationTime
             frameLock.unlock()
             
-            // Zero-copy transfer of CVPixelBuffer to hardware MTLTexture
+            let inWidth = CVPixelBufferGetWidth(pixelBuffer)
+            let inHeight = CVPixelBufferGetHeight(pixelBuffer)
+            
+            // 1. Acquire offscreen CVPixelBuffer from persistent pool
+            guard let pool = getOrCreateOffscreenPool(width: inWidth, height: inHeight) else { return }
+            var offscreenPixelBuffer: CVPixelBuffer?
+            let createStatus = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &offscreenPixelBuffer)
+            guard createStatus == kCVReturnSuccess, let offscreenBuffer = offscreenPixelBuffer else { return }
+            
+            // 2. Map input and offscreen CVPixelBuffers to hardware MTLTextures
             guard let inputTexture = textureCacheManager.texture(from: pixelBuffer),
+                  let offscreenTexture = textureCacheManager.texture(from: offscreenBuffer),
                   let vertexBuffer = vertexBuffer,
                   let samplerState = samplerState,
                   let commandBuffer = commandQueue.makeCommandBuffer() else {
@@ -212,21 +275,19 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
             }
             
             let shaderName = era.video.shaderFunction
-            guard let pipelineState = pipelineStates[shaderName] ?? pipelineStates["early_digital_fragment"] ?? pipelineStates.values.first else {
+            guard let pipelineState = pipelineStates[shaderName] ?? pipelineStates["early_digital_fragment"] ?? pipelineStates.values.first,
+                  let passthroughPipeline = pipelineStates["passthrough_fragment"] ?? pipelineStates["modern_reference_fragment"] else {
                 return
             }
             
-            // Dynamic 16:9 aspect ratio calculation
+            // Dynamic 16:9 aspect ratio calculation for onscreen presentation
             let drawableWidth = max(1.0, Float(view.drawableSize.width))
             let drawableHeight = max(1.0, Float(view.drawableSize.height))
             let viewAspect = drawableWidth / drawableHeight
-            
-            // Target 16:9 (0.5625 in portrait 9:16, 1.777 in landscape 16:9)
             let targetAspect: Float = (drawableHeight > drawableWidth) ? (9.0 / 16.0) : (16.0 / 9.0)
             
             var scaleX: Float = 1.0
             var scaleY: Float = 1.0
-            
             if viewAspect > targetAspect {
                 scaleX = targetAspect / viewAspect
             } else {
@@ -234,7 +295,7 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
             }
             
             let elapsed = Float(Date().timeIntervalSince(startTime))
-            var uniforms = MetalEraUniforms(
+            var offscreenUniforms = MetalEraUniforms(
                 time: elapsed,
                 chromaticAberrationIntensity: era.video.chromaticAberrationIntensity,
                 scanLineIntensity: era.video.scanLineIntensity,
@@ -245,31 +306,74 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
                 macroblockGridSize: Int32(era.video.macroblockGridSize),
                 isInterlaced: era.video.isInterlaced ? 1 : 0,
                 colorTemperatureShift: (era.video.whiteBalanceKelvin - 5500.0) / 3000.0,
+                aspectRatioScaleX: 1.0, // 1:1 native offscreen target geometry
+                aspectRatioScaleY: 1.0
+            )
+            
+            // 3. Offscreen Render Pass: Render Era Shader + OSD onto offscreenTexture
+            let offscreenPassDescriptor = MTLRenderPassDescriptor()
+            offscreenPassDescriptor.colorAttachments[0].texture = offscreenTexture
+            offscreenPassDescriptor.colorAttachments[0].loadAction = .clear
+            offscreenPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+            offscreenPassDescriptor.colorAttachments[0].storeAction = .store
+            
+            if let offscreenEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: offscreenPassDescriptor) {
+                offscreenEncoder.label = "Offscreen Era + OSD Encoder"
+                offscreenEncoder.setRenderPipelineState(pipelineState)
+                offscreenEncoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+                offscreenEncoder.setVertexBytes(&offscreenUniforms, length: MemoryLayout<MetalEraUniforms>.size, index: 1)
+                offscreenEncoder.setFragmentTexture(inputTexture, index: 0)
+                offscreenEncoder.setFragmentSamplerState(samplerState, index: 0)
+                offscreenEncoder.setFragmentBytes(&offscreenUniforms, length: MemoryLayout<MetalEraUniforms>.size, index: 0)
+                offscreenEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+                
+                // Composite transparent OSD overlay onto the offscreen target
+                frameLock.lock()
+                let osdTex = self.osdTexture
+                frameLock.unlock()
+                
+                if let osdTex = osdTex {
+                    offscreenEncoder.setRenderPipelineState(passthroughPipeline)
+                    offscreenEncoder.setFragmentTexture(osdTex, index: 0)
+                    offscreenEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+                }
+                
+                offscreenEncoder.endEncoding()
+            }
+            
+            // 4. Send fully rendered offscreen CVPixelBuffer to recordingDelegate (contains shaders + OSD)
+            recordingDelegate?.didRenderFrame(pixelBuffer: offscreenBuffer, presentationTime: presentationTime)
+            
+            // 5. Onscreen Viewfinder Pass: Render offscreenTexture onto view.currentDrawable with aspect ratio geometry
+            var screenUniforms = MetalEraUniforms(
+                time: elapsed,
+                chromaticAberrationIntensity: 0,
+                scanLineIntensity: 0,
+                trackingWobbleSpeed: 0,
+                vignetteStrength: 0,
+                noiseFloorStrength: 0,
+                posterizeColors: 0,
+                macroblockGridSize: 0,
+                isInterlaced: 0,
+                colorTemperatureShift: 0,
                 aspectRatioScaleX: scaleX,
                 aspectRatioScaleY: scaleY
             )
             
-            guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
-                return
+            if let screenEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: viewPassDescriptor) {
+                screenEncoder.label = "Onscreen Viewfinder Encoder"
+                screenEncoder.setRenderPipelineState(passthroughPipeline)
+                screenEncoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+                screenEncoder.setVertexBytes(&screenUniforms, length: MemoryLayout<MetalEraUniforms>.size, index: 1)
+                screenEncoder.setFragmentTexture(offscreenTexture, index: 0)
+                screenEncoder.setFragmentSamplerState(samplerState, index: 0)
+                screenEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+                screenEncoder.endEncoding()
             }
-            
-            renderEncoder.label = "Rewind52 \(shaderName) Encoder"
-            renderEncoder.setRenderPipelineState(pipelineState)
-            renderEncoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
-            renderEncoder.setVertexBytes(&uniforms, length: MemoryLayout<MetalEraUniforms>.size, index: 1)
-            renderEncoder.setFragmentTexture(inputTexture, index: 0)
-            renderEncoder.setFragmentSamplerState(samplerState, index: 0)
-            renderEncoder.setFragmentBytes(&uniforms, length: MemoryLayout<MetalEraUniforms>.size, index: 0)
-            
-            renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
-            renderEncoder.endEncoding()
             
             commandBuffer.present(currentDrawable)
             commandBuffer.commit()
             textureCacheManager.flush()
-            
-            // Notify recording delegate if capturing
-            recordingDelegate?.didRenderFrame(pixelBuffer: pixelBuffer, presentationTime: presentationTime)
         }
     }
 }
